@@ -142,6 +142,12 @@ enable_testing()
 # half-patched build. Rebasing a submodule onto a new upstream tip requires
 # refreshing the corresponding .patch.
 #
+# * llama-gemma4-htp-opt.patch is the Gemma4 HTP optimization branch of the
+#   internal ggml/llama.cpp fork (weihuan/gemma4-htp-opt) diffed against its
+#   upstream merge-base, which is the pinned submodule commit. Lenovo-only build,
+#   see qcom-ai-hub/geniex#1816. The fork drops upstream's HTP power-mode table
+#   for a fixed max DCVS vote, so llama-hexagon-power-mode-setter.patch is not
+#   applied and per-model power mode is a no-op.
 # * llama-hexagon-release-sessions.patch exposes a
 #   "ggml_backend_hexagon_release_sessions" entry via get_proc_address, used by
 #   the llama.cpp plugin to tear down HTP FastRPC channels on model unload so
@@ -180,11 +186,10 @@ enable_testing()
 #   clCreateImage returned -40 and aborted.
 if(GENIEX_PLUGIN_LLAMA_CPP)
     set(_LLAMA_DIR  "${CMAKE_CURRENT_SOURCE_DIR}/../third-party/llama.cpp")
-    set(_LLAMA_PATCHES)
+    set(_LLAMA_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/llama-gemma4-htp-opt.patch")
     if(GGML_HEXAGON)
         list(APPEND _LLAMA_PATCHES
-            "${CMAKE_CURRENT_SOURCE_DIR}/patches/llama-hexagon-release-sessions.patch"
-            "${CMAKE_CURRENT_SOURCE_DIR}/patches/llama-hexagon-power-mode-setter.patch")
+            "${CMAKE_CURRENT_SOURCE_DIR}/patches/llama-hexagon-release-sessions.patch")
     endif()
     if(GGML_OPENCL)
         list(APPEND _LLAMA_PATCHES
