@@ -147,7 +147,8 @@ enable_testing()
 #   upstream merge-base, which is the pinned submodule commit. Lenovo-only build,
 #   see qcom-ai-hub/geniex#1816. The fork drops upstream's HTP power-mode table
 #   for a fixed max DCVS vote, so llama-hexagon-power-mode-setter.patch is not
-#   applied and per-model power mode is a no-op.
+#   applied and per-model power mode is a no-op. The fork also drops v85; the
+#   patch restores upstream's v85 skel (toolv21), .inf entry and arch cap.
 # * llama-hexagon-release-sessions.patch exposes a
 #   "ggml_backend_hexagon_release_sessions" entry via get_proc_address, used by
 #   the llama.cpp plugin to tear down HTP FastRPC channels on model unload so
