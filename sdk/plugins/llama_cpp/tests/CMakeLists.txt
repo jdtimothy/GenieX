@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(llama_cpp_prefix_cache_test LANGUAGES CXX)
+
+include(CTest)
+
+add_executable(llama_cpp_prefix_cache_test prefix_cache_test.cpp)
+target_compile_features(llama_cpp_prefix_cache_test PRIVATE cxx_std_17)
+add_test(NAME llama_cpp_prefix_cache_test COMMAND llama_cpp_prefix_cache_test)

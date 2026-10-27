@@ -16,6 +16,7 @@
 #include "htp_session.h"
 #include "logging.h"
 #include "params.h"
+#include "prefix_cache.h"
 #include "profiler.h"
 
 namespace geniex {
@@ -142,8 +143,50 @@ int32_t LlamaLlm::reset() {
     this->n_past        = 0;
     this->past_prompt_tokens.clear();
 
-    llama_memory_clear(llama_get_memory(this->ctx), /*clear data=*/true);
+    llama_memory_t mem = llama_get_memory(this->ctx);
+    llama_memory_clear(mem, /*clear data=*/true);
+    if (this->draft_ctx) {
+        llama_memory_t draft_mem = llama_get_memory(this->draft_ctx);
+        if (draft_mem != mem) {
+            llama_memory_clear(draft_mem, /*clear data=*/true);
+        }
+    }
 
+    return GENIEX_SUCCESS;
+}
+
+int32_t LlamaLlm::reset_prefix_cache_state() {
+    const int32_t reset_rc = this->reset();
+    if (reset_rc != GENIEX_SUCCESS || !this->spec_params_) {
+        return reset_rc;
+    }
+    return this->reinitialize_speculative();
+}
+
+int32_t LlamaLlm::reinitialize_speculative() {
+    if (!this->spec_params_) {
+        return GENIEX_ERROR_LLM_GENERATION_FAILED;
+    }
+
+    if (this->spec) {
+        common_speculative_free(this->spec);
+        this->spec = nullptr;
+    }
+    this->spec_reinit_required = true;
+
+    try {
+        common_params_speculative params = *this->spec_params_;
+        this->spec                       = common_speculative_init(params, /*n_seq=*/1);
+    } catch (const std::exception& e) {
+        GENIEX_LOG_ERROR("failed to reinitialize speculative context: {}", e.what());
+    }
+
+    if (!this->spec) {
+        GENIEX_LOG_ERROR("failed to reinitialize speculative context after cache reset");
+        return GENIEX_ERROR_LLM_GENERATION_FAILED;
+    }
+
+    this->spec_reinit_required = false;
     return GENIEX_SUCCESS;
 }
 
@@ -247,6 +290,11 @@ int32_t LlamaLlm::generate(const geniex_LlmGenerateInput* input, geniex_LlmGener
     if (!has_input_embd && !has_input_ids && !has_prompt_utf8)
         return GENIEX_ERROR_COMMON_INVALID_INPUT;  // error: none of input_embd, input_ids, prompt_utf8 provided
 
+    if (this->spec_reinit_required) {
+        const int32_t spec_rc = this->reinitialize_speculative();
+        if (spec_rc != GENIEX_SUCCESS) return spec_rc;
+    }
+
     geniex_GenerationConfig cfg = input->config ? *input->config : geniex_GenerationConfig{};
     cfg.max_tokens              = cfg.max_tokens > 0 ? cfg.max_tokens : 128;
 
@@ -306,7 +354,8 @@ int32_t LlamaLlm::generate(const geniex_LlmGenerateInput* input, geniex_LlmGener
     // Prefix Match — not applicable to embedding input (nothing to diff against a
     // token history), so an input_embd call always fully redecodes its rows.
 
-    int32_t prompt_len = has_input_embd ? input->input_embd_count : static_cast<int32_t>(prompt_ids.size());
+    int32_t prompt_len         = has_input_embd ? input->input_embd_count : static_cast<int32_t>(prompt_ids.size());
+    int32_t cache_reset_status = GENIEX_SUCCESS;
     if (!has_input_embd) {
         int match_len = 0;
         while (match_len < std::min((int)past_prompt_tokens.size(), prompt_len) &&
@@ -326,21 +375,42 @@ int32_t LlamaLlm::generate(const geniex_LlmGenerateInput* input, geniex_LlmGener
 
         if (match_len < (int)this->past_prompt_tokens.size()) {
             if (match_len < this->n_past_global - this->n_past) {
-                // match out of kvcache, need reset
-                llama_memory_seq_rm(mem, 0, 0, this->n_past);
-                this->n_past        = 0;
-                this->n_past_global = prompt_len > n_ctx - 4 ? n_ctx - 4 : 0;
-                GENIEX_LOG_INFO("prefix match: n_past_global rollback to: {}", this->n_past_global);
+                // The matching prefix is outside the cache; discard cached positions.
+                if (llama_memory_seq_rm(mem, 0, 0, this->n_past)) {
+                    this->n_past        = 0;
+                    this->n_past_global = prompt_len > n_ctx - 4 ? n_ctx - 4 : 0;
+                    GENIEX_LOG_INFO("prefix match: n_past_global rollback to: {}", this->n_past_global);
+                } else {
+                    cache_reset_status = this->reset_prefix_cache_state();
+                    if (cache_reset_status == GENIEX_SUCCESS) {
+                        GENIEX_LOG_WARN("prefix match cache removal failed; clearing cache and re-prefilling prompt");
+                    } else {
+                        GENIEX_LOG_ERROR("failed to reset speculative state after prefix cache removal failure");
+                    }
+                }
+                this->past_prompt_tokens.assign(prompt_ids.begin(), prompt_ids.begin() + this->n_past_global);
             } else {
-                // match in kvcache, need rollback
-                llama_memory_seq_rm(mem, 0, match_len, -1);
-                this->n_past        = match_len;
-                this->n_past_global = match_len;
-                GENIEX_LOG_INFO("prefix match: n_past_global rollback to: {}", this->n_past_global);
+                // Reuse the matching prefix only when the cache accepted the rollback.
+                const PrefixCacheRollbackResult rollback_result = rollback_prefix_cache(
+                    match_len,
+                    this->n_past,
+                    this->n_past_global,
+                    this->past_prompt_tokens,
+                    prompt_ids,
+                    [&]() { return llama_memory_seq_rm(mem, 0, match_len, -1); },
+                    [&]() { return this->reset_prefix_cache_state() == GENIEX_SUCCESS; });
+                if (rollback_result == PrefixCacheRollbackResult::reused) {
+                    GENIEX_LOG_INFO("prefix match: n_past_global rollback to: {}", this->n_past_global);
+                } else if (rollback_result == PrefixCacheRollbackResult::reset) {
+                    GENIEX_LOG_WARN("prefix match rollback failed; clearing cache and re-prefilling prompt");
+                } else {
+                    cache_reset_status = GENIEX_ERROR_LLM_GENERATION_FAILED;
+                    GENIEX_LOG_ERROR("failed to reset speculative state after prefix rollback failure");
+                }
             }
-            this->past_prompt_tokens.assign(prompt_ids.begin(), prompt_ids.begin() + this->n_past_global);
         }
     }
+    if (cache_reset_status != GENIEX_SUCCESS) return cache_reset_status;
 
     std::vector<llama_token> embd_inp;
     if (!has_input_embd) {
@@ -805,6 +875,8 @@ int32_t LlamaLlm::decode_speculative(const geniex_GenerationConfig& cfg, const s
     // Local view of the committed tokens the drafter reads; grows as we accept.
     std::vector<llama_token> prompt = prompt_ids;
 
+    // Begin after prefill with the complete current prompt. This refreshes prompt-aware speculative state after a cache
+    // reset.
     common_speculative_begin(this->spec, seq_id, prompt);
 
     // Sample the first token from the prefill; keep it separate as id_last.
@@ -917,6 +989,8 @@ void LlamaLlm::teardown_speculative() {
         common_speculative_free(this->spec);
         this->spec = nullptr;
     }
+    this->spec_params_.reset();
+    this->spec_reinit_required = false;
     if (this->draft_ctx) {
         llama_free(this->draft_ctx);
         this->draft_ctx = nullptr;
@@ -978,7 +1052,8 @@ int32_t LlamaLlm::setup_speculative(
         spar.draft.ctx_dft = this->draft_ctx;
     }
 
-    this->spec = common_speculative_init(spar, /*n_seq=*/1);
+    this->spec_params_ = spar;
+    this->spec         = common_speculative_init(spar, /*n_seq=*/1);
     if (!this->spec) {
         GENIEX_LOG_ERROR("failed to initialize speculative context");
         return GENIEX_ERROR_COMMON_MODEL_LOAD;

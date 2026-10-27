@@ -191,7 +191,17 @@ jobs:
             python -m pytest bindings/python/tests --ignore=bindings/python/tests/unit -v | tee .pytest-int.log
           fi
 
-      # ---- Linux: run pytest inside ubuntu:24.04 (matches SDK's GLIBC). ----
+      # ---- Linux: run SDK model-free checks and pytest inside ubuntu:24.04. ----
+
+      - name: Run llama.cpp prefix-cache regression (Linux Python cell)
+        if: steps.skip.outputs.skip != 'true' && inputs.language == 'python' && matrix.platform == 'linux-arm64'
+        uses: ./.github/actions/run-in-ubuntu24
+        with:
+          apt_packages: "ca-certificates cmake g++ git"
+          script: |
+            cmake -S sdk/plugins/llama_cpp/tests -B .cache/llama-prefix-cache-test -DCMAKE_BUILD_TYPE=Release
+            cmake --build .cache/llama-prefix-cache-test --parallel
+            ctest --test-dir .cache/llama-prefix-cache-test --output-on-failure
 
       - name: Run pytest (Linux, ubuntu:24.04 container)
         if: steps.skip.outputs.skip != 'true' && inputs.language != 'go' && matrix.platform == 'linux-arm64'

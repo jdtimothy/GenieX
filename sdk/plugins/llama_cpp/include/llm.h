@@ -32,6 +32,9 @@ class LlamaLlm : public ILlm {
     llama_context*      draft_ctx   = nullptr;
     common_speculative* spec        = nullptr;
     int32_t             spec_n_max  = 0;
+    // Retain resolved context pointers and settings to rebuild per-generation speculative state after reset.
+    std::optional<common_params_speculative> spec_params_;
+    bool                                     spec_reinit_required = false;
 
     int                      n_past_global = 0;
     int                      n_past        = 0;   // for context shifting
@@ -62,7 +65,9 @@ class LlamaLlm : public ILlm {
     virtual int32_t decide(const geniex_DecideInput*, geniex_DecideOutput*) override;
 
    private:
-    void set_sampler(const geniex_SamplerConfig* cfg);
+    void    set_sampler(const geniex_SamplerConfig* cfg);
+    int32_t reset_prefix_cache_state();
+    int32_t reinitialize_speculative();
 
     int32_t setup_speculative(
         const geniex_ModelConfig& config, Device device, const char* device_id, common_params_speculative& spar);
