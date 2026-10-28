@@ -78,6 +78,14 @@ class LlamaPlugin : public Plugin {
 #endif
         }
 
+#if defined(_WIN32)
+        // Busy-poll HTP op completions, as llama.cpp's scripts/snapdragon/run.py does: +6% prefill and
+        // +8% MTP decode on X2 Elite (gemma-4-26B) at the cost of one spinning host thread while busy.
+        if (!std::getenv("GGML_HEXAGON_OPPOLL")) {
+            _putenv_s("GGML_HEXAGON_OPPOLL", "1");
+        }
+#endif
+
         if (!std::getenv("GGML_HEXAGON_MBUF")) {
 #if !defined(__ANDROID__) && defined(__linux__)
             // ggml-hexagon's default 1 GiB host-buffer mmap cap can exceed what the fastrpc/CMA pool
